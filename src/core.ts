@@ -164,11 +164,10 @@ export async function* parallel<T, R>(source: AsyncIterable<T> | Iterable<T>, co
 }
 
 export function is_node(): boolean {
-  return typeof process !== 'undefined' && !!process.versions?.node && !process.versions?.workerd &&
-    !(typeof navigator !== 'undefined' && navigator.userAgent.includes('Cloudflare-Workers'));
+  return typeof process !== 'undefined' && !!process.versions?.node;
 }
 
-// Variable imports keep Node-only modules out of Worker bundles.
+// Load optional runtime facilities only when needed.
 export function node_module<T>(name: string): Promise<T> { return import(name) as Promise<T>; }
 interface FileHandle {
   write(data: Uint8Array, offset: number, length: number): Promise<{ bytesWritten: number }>;
@@ -190,7 +189,7 @@ export async function node_fs(): Promise<FileSystem> {
 }
 
 export function require_output(options: OutputOptions): void {
-  if (!options.write_file && !is_node()) throw new Error('In Workers, provide write_file(path, body) to stream output to storage.');
+  if (!options.write_file && !is_node()) throw new Error('Local file output requires Node.js. Provide write_file(path, body) to use another destination.');
 }
 
 export async function save(path: string, body: ByteStream, options: OutputOptions = {}): Promise<number> {

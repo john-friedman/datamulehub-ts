@@ -1,4 +1,4 @@
-import { api_json, ApiError, get_api_key, is_node, node_module, object, parse_json, request_signal, sleep } from './core.js';
+import { api_json, ApiError, get_api_key, is_node, node_module, object, parse_json, sleep } from './core.js';
 import type { RequestOptions, Row } from './types.js';
 
 export type Source = 'Rss' | 'Efts' | 'anticipate';
@@ -36,7 +36,7 @@ export function remove_endpoint(options: RemoveEndpointOptions): Promise<Record<
     options.id === undefined ? { endpoint: options.endpoint } : undefined, 'DELETE');
 }
 
-/** Small adapter surface shared by Node's ws and Workers' accepted WebSocket. */
+/** Minimal socket interface for notification streams. */
 export interface FilingSocket {
   readyState: number;
   close(code?: number, reason?: string): void;
@@ -84,18 +84,7 @@ async function connect_socket(url: string, credential: string, options: StreamOp
     });
     return socket;
   }
-  // Workers permits Authorization on an HTTP Upgrade request. A browser-style
-  // WebSocket constructor does not, so it cannot implement this protocol alone.
-  const response = await (options.fetch ?? globalThis.fetch)(url.replace(/^ws/, 'http'), {
-    headers: { ...headers, Upgrade: 'websocket' }, signal: request_signal({ ...options, timeout: options.timeout ?? 30 }),
-  });
-  const socket = (response as Response & { webSocket?: FilingSocket & { accept(): void } }).webSocket;
-  if (response.status !== 101 || !socket) {
-    await response.body?.cancel();
-    throw new ApiError(response.status, 'WebSocket upgrade failed. In Node, supply a connect adapter (see README).');
-  }
-  socket.accept();
-  return socket;
+  throw new Error('Provide a connect adapter for authenticated WebSockets in this runtime.');
 }
 
 async function* events(socket: FilingSocket, options: StreamOptions, fastest: boolean, expires?: number): AsyncGenerator<Row> {
@@ -157,6 +146,7 @@ export class WebSocketPingTimeout extends Error { override name = 'WebSocketPing
 export class WebSocketServerError extends Error { override name = 'WebSocketServerError'; }
 
 async function* stream(options: StreamOptions, fastest: boolean): AsyncGenerator<Row> {
+  if (!options.connect && !is_node()) throw new Error('Provide a connect adapter for authenticated WebSockets in this runtime.');
   const key = get_api_key(options.api_key);
   for (const [name, value] of Object.entries({ idle_timeout: options.idle_timeout, reconnect_delay: options.reconnect_delay, recv_timeout: options.recv_timeout, ping_interval: options.ping_interval, ping_timeout: options.ping_timeout })) {
     if (value != null && (!Number.isFinite(value) || value < 0)) throw new RangeError(`${name} must be nonnegative.`);

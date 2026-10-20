@@ -6,7 +6,6 @@ export * as sec_filings_notifications from './sec_filings_notifications.js';
 export * as object_transfer from './object_transfer.js';
 export * as utils from './utils.js';
 export { ApiError, get_api_key } from './core.js';
-export { r2_writer } from './object_transfer.js';
 export type * from './types.js';
 export type { ArchiveOptions } from './sec_filings_archive.js';
 export type { DownloadOptions, DatasetResult } from './datasets.js';

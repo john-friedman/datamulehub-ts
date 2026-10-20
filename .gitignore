@@ -9,17 +9,13 @@ dist/
 .env
 .env.*
 !.env.example
-.dev.vars
-.dev.vars.*
-!.dev.vars.example
 .npmrc
 credentials*.json
 service_account*.json
 *.pem
 *.key
 
-# Wrangler and local data
-.wrangler/
+# Local data
 downloads/
 datamule-query-result/
 *.parquet

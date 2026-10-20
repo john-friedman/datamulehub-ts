@@ -69,7 +69,7 @@ export async function* parquet_rows(source: ParquetSource, options: ParquetOptio
     const end = start + Number(group.num_rows);
     const selected = group.columns.filter(c => !columns || columns.includes(c.meta_data?.path_in_schema[0] ?? ''));
     const decoded_bytes = selected.reduce((sum, c) => sum + Number(c.meta_data?.total_uncompressed_size ?? 0), 0);
-    if (decoded_bytes > limit) throw new RangeError(`Parquet row group needs ${decoded_bytes} uncompressed bytes, above max_buffer_bytes (${limit}). Process it outside Workers or raise the limit.`);
+    if (decoded_bytes > limit) throw new RangeError(`Parquet row group needs ${decoded_bytes} uncompressed bytes, above max_buffer_bytes (${limit}). Raise the limit if enough memory is available.`);
     const rows = await parquetReadObjects({
       file: source.file, metadata, rowStart: start, rowEnd: end, columns, utf8: !raw,
       compressors: { ZSTD: (input, outputLength) => {

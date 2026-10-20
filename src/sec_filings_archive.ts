@@ -136,8 +136,7 @@ async function download(mode: string, options: ArchiveOptions): Promise<string[]
         for (const item of prepared) await batches.append(item.name, item.temporary.size, item.temporary.open());
       }
     } else {
-      // Workers has no disk. Consume one entry at a time rather than multiply
-      // decoder windows and buffered entries by max_workers.
+      // Without temporary disk, consume one entry at a time to bound memory.
       for await (const job of jobs(mode, options)) {
         for await (const item of items(mode, job, options)) {
           if (item.size !== undefined) await batches.append(item.name, item.size, item.body);

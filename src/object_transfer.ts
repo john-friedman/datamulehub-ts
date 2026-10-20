@@ -4,7 +4,7 @@ import { get_link, resolve_path } from './datasets.js';
 import { filings } from './sec_filings_lookup.js';
 import { SGML_BASE_URL, TAR_BASE_URL } from './sec_filings_archive.js';
 import { sized } from './io.js';
-import type { ByteStream, FilingFilters, OutputOptions, WriteFile } from './types.js';
+import type { ByteStream, FilingFilters, OutputOptions } from './types.js';
 
 export interface S3Credentials {
   aws_access_key_id: string;
@@ -12,7 +12,7 @@ export interface S3Credentials {
   aws_session_token?: string;
   region_name: string;
   bucket_name: string;
-  /** Optional S3-compatible origin, such as an R2 S3 endpoint. */
+  /** Optional S3-compatible origin. */
   endpoint_url?: string;
 }
 export interface GCSCredentials {
@@ -33,41 +33,6 @@ export interface TransferOptions extends FilingFilters, OutputOptions {
 export interface TransferFailure { key: string; error: string }
 export interface TransferResult { total: number; successful: number; size_bytes: number; failed: TransferFailure[] }
 
-/** Structural subset of a Workers R2Bucket; no Cloudflare runtime dependency. */
-export interface R2BucketLike {
-  put(key: string, value: Uint8Array<ArrayBuffer>): Promise<unknown>;
-  createMultipartUpload(key: string): Promise<{
-    uploadPart(partNumber: number, value: Uint8Array<ArrayBuffer>): Promise<{ partNumber: number; etag: string }>;
-    complete(parts: { partNumber: number; etag: string }[]): Promise<unknown>;
-    abort(): Promise<void>;
-  }>;
-}
-
-/** R2.put requires a known-length body. Multipart upload also supports decoded
- * streams whose final length isn't known until they have been consumed. */
-export function r2_writer(bucket: R2BucketLike, options: Pick<TransferOptions, 'chunk_size_mb' | 'max_buffer_bytes' | 'signal'> = {}): WriteFile {
-  const chunk_size = part_size(options);
-  return async (path, body) => {
-    let upload: Awaited<ReturnType<R2BucketLike['createMultipartUpload']>> | undefined;
-    const completed: { partNumber: number; etag: string }[] = [];
-    try {
-      for await (const chunk of parts(body, chunk_size)) {
-        options.signal?.throwIfAborted();
-        if (!upload && chunk.length < chunk_size) { await bucket.put(path, chunk as Uint8Array<ArrayBuffer>); return; }
-        upload ??= await bucket.createMultipartUpload(path);
-        if (completed.length >= 10000) throw new Error('R2 upload exceeds 10,000 parts.');
-        completed.push(await upload.uploadPart(completed.length + 1, chunk as Uint8Array<ArrayBuffer>));
-      }
-      options.signal?.throwIfAborted();
-      if (upload) await upload.complete(completed);
-      else await bucket.put(path, new Uint8Array(0));
-    } catch (error) {
-      await upload?.abort().catch(() => {});
-      if (!body.locked) await body.cancel().catch(() => {});
-      throw error;
-    }
-  };
-}
 interface TransferItem { key: string; url?: string; path?: string }
 type Upload = (key: string, body: ByteStream, size: number | undefined, content_type: string) => Promise<number>;
 
