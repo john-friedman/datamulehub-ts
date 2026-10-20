@@ -1,7 +1,11 @@
 {
-  "name": "datamulehub-ts",
-  "version": "0.1.0",
+  "name": "datamulehub",
+  "version": "0.1.1",
   "description": "TypeScript client for Datamule cloud APIs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/john-friedman/datamulehub-ts.git"
+  },
   "type": "module",
   "sideEffects": false,
   "license": "MIT",
