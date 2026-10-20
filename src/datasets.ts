@@ -1,4 +1,4 @@
-import { api_json, ApiError, billing_result, checked_fetch, object, parallel, require_output, save, sleep } from './core.js';
+import { api_json, ApiError, billing_result, checked_fetch, log_billing, object, parallel, require_output, save, sleep } from './core.js';
 import { DOCUMENT_TYPES_BY_TABLE } from './document_types.js';
 import { fetch_body } from './sec_filings_archive.js';
 import { filings } from './sec_filings_lookup.js';
@@ -87,9 +87,13 @@ async function delta_link(path: string, options: DownloadOptions): Promise<Downl
     try { return await get_link(path, { ...options, timeout: options.timeout ?? 30 }); }
     catch (error) {
       if (!(error instanceof ApiError) || error.status !== 404) throw error;
-      if (!attempt) await sleep(3, options.signal);
+      if (!attempt) {
+        console.info(`[datamulehub] Dataset object unavailable; retrying in 3s: ${path}`);
+        await sleep(3, options.signal);
+      }
     }
   }
+  console.info(`[datamulehub] Dataset object unavailable; skipping: ${path}`);
 }
 
 async function as_source(link: DownloadLink, options: DownloadOptions, key?: string): Promise<ParquetSource> {
@@ -121,6 +125,13 @@ export async function download(dataset: string, options: DownloadOptions = {}): 
   if (accessions && (!has_delta || mode === 'daily')) throw new TypeError('accession requires an XML, metadata, or simple_xbrl dataset and from_storage=both or delta.');
   if (mode === 'delta' && !has_delta) throw new TypeError('This dataset does not support delta storage.');
   const date = has_delta && mode !== 'daily' ? delta_date() : undefined;
+  const started = Date.now();
+  console.info(`[datamulehub] Dataset download started: dataset=${dataset} from_storage=${mode}`);
+  const complete = (result: DatasetResult): DatasetResult => {
+    log_billing(`Dataset download complete: filename=${result.filename} size_bytes=${result.size_bytes} elapsed=${((Date.now() - started) / 1000).toFixed(1)}s`, result.billing);
+    if (result.missing_accessions?.length) console.info(`[datamulehub] Dataset download missing accessions: count=${result.missing_accessions.length}`);
+    return result;
+  };
   let filename = options.filename ?? (accessions ? `${table ?? 'simple_xbrl'}.parquet` : path.split('/').at(-1)!);
   const bills: Billing[] = [];
   let snapshot: ParquetSource | undefined;
@@ -136,13 +147,14 @@ export async function download(dataset: string, options: DownloadOptions = {}): 
       if (name) filename = name.trim().split(/[\\/]/).at(-1) || filename;
     });
     const size = await save(filename, body, options);
-    return { ...billing_result(filename, size, bills), object_key: daily.object_key };
+    return complete({ ...billing_result(filename, size, bills), object_key: daily.object_key });
   }
   const keys = await candidates(table, date, accessions, options);
   if (daily) {
     snapshot = await as_source(daily, options);
     if (keys.size) await remove_snapshot_keys(snapshot, keys, table, options);
   }
+  console.info(`[datamulehub] Dataset delta lookup complete: candidates=${keys.size}`);
   const sources: ParquetSource[] = snapshot ? [snapshot] : [];
   const object_keys: string[] = [];
   // Only footers and links are retained here. Payloads are decoded sequentially below.
@@ -152,10 +164,12 @@ export async function download(dataset: string, options: DownloadOptions = {}): 
   })) {
     if (result) { sources.push(result.source); bills.push(result.link.billing); object_keys.push(result.key); }
   }
+  console.info(`[datamulehub] Dataset delta files available: files=${object_keys.length} missing=${keys.size - object_keys.length}`);
   if (daily && object_keys.length === 0) {
     const size = await save(filename, await fetch_body(daily.download_url, options), options);
-    return { ...billing_result(filename, size, bills), object_key: daily.object_key };
+    return complete({ ...billing_result(filename, size, bills), object_key: daily.object_key });
   }
+  console.info(`[datamulehub] Dataset merge started: sources=${sources.length} filename=${filename}`);
   const schema = merge_schema(sources, true, !table && object_keys.length > 0);
   if (!sources.length && !table) {
     const text_columns = ['taxonomy', 'name', 'value', 'period_start_date', 'period_end_date', 'members', 'filingDate', '_sourceKey'];
@@ -176,8 +190,8 @@ export async function download(dataset: string, options: DownloadOptions = {}): 
   })();
   const size = await save(filename, parquet_stream(rows, schema, options), options);
   const downloaded = new Set(object_keys.map(key => key.split('/').at(-1)!.replace(/\.parquet$/, '')));
-  return {
+  return complete({
     ...billing_result(filename, size, bills), object_key: accessions ? null : path,
     ...(accessions ? { object_keys, accession: accessions, missing_accessions: accessions.filter(a => !downloaded.has(a)) } : {}),
-  };
+  });
 }

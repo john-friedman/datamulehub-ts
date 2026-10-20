@@ -1,4 +1,4 @@
-import { api_json, api_response, billing_result, byte_stream, chunks, object, positive, require_output, save } from './core.js';
+import { api_json, api_response, billing_result, byte_stream, chunks, log_billing, object, positive, require_output, save } from './core.js';
 import { parquet_rows, parquet_source, parquet_stream } from './parquet.js';
 import type { ParquetOptions } from './parquet.js';
 import { spool } from './io.js';
@@ -112,11 +112,14 @@ export async function query(sql: string, options: QueryOptions = {}): Promise<Qu
   require_output(options);
   if (typeof sql !== 'string' || !sql.trim()) throw new TypeError('sql is required.');
   const directory = options.output_dir ?? 'datamule-query-result';
+  const started = Date.now();
+  console.info(`[datamulehub] Query started: engine=${is_fastest(sql) ? 'fastest metadata' : 'athena'}`);
   const files: string[] = [];
   let billing: Billing, query_id: string | null = null;
   const write = async (body: ByteStream) => {
     const path = `${directory}/part-${String(files.length).padStart(5, '0')}.parquet`;
     await save(path, body, options); files.push(path);
+    console.info(`[datamulehub] Query result file complete: ${path}`);
   };
   if (is_fastest(sql)) {
     const result = await fastest(sql, options); billing = result.billing;
@@ -159,6 +162,7 @@ export async function query(sql: string, options: QueryOptions = {}): Promise<Qu
     else for await (const entry of tar_entries(result.body)) await write(entry.body);
   }
   const result = billing_result(directory, 0, [billing]);
+  log_billing(`Query complete: files=${files.length} output_dir=${directory} query_id=${query_id ?? 'none'} elapsed=${((Date.now() - started) / 1000).toFixed(1)}s`, billing);
   return { output_dir: directory, files, query_id, cost: result.cost, remaining_balance: result.remaining_balance, remaining_api_key_credits: result.remaining_api_key_credits, billing };
 }
 
@@ -166,7 +170,9 @@ export interface ReadQueryOptions extends Omit<QueryOptions, 'output_dir' | 'wri
 export async function read_query(sql: string, options: ReadQueryOptions = {}): Promise<Row[]> {
   if (options.max_rows !== undefined) positive(options.max_rows, 'max_rows');
   if (is_fastest(sql)) {
-    const { rows } = await fastest(sql, options);
+    console.info('[datamulehub] Fastest filings metadata query started');
+    const { rows, billing } = await fastest(sql, options);
+    log_billing(`Fastest filings metadata query complete: rows=${rows.length}`, billing);
     if (options.max_rows !== undefined && rows.length > options.max_rows) throw new RangeError('Query exceeds max_rows.');
     return rows;
   }
@@ -180,5 +186,6 @@ export async function read_query(sql: string, options: ReadQueryOptions = {}): P
       }
     } finally { await temporary.dispose(); }
   } });
+  console.info(`[datamulehub] Query rows read: rows=${rows.length}`);
   return rows;
 }

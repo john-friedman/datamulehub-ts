@@ -210,6 +210,10 @@ async function transfer(items: AsyncIterable<TransferItem> | Iterable<TransferIt
   const retries = options.retry_errors ?? 3;
   if (!Number.isSafeInteger(retries) || retries < 0) throw new RangeError('retry_errors must be nonnegative.');
   part_size(options); // Validate before obtaining any paid links.
+  const started = Date.now();
+  let last_progress = started;
+  const label = dataset ? 'Dataset transfer' : 'Archive transfer';
+  console.info(`[datamulehub] ${label} started: max_workers=${options.max_workers ?? 4}`);
   const result: TransferResult = { total: 0, successful: 0, size_bytes: 0, failed: [] };
   for await (const item of parallel(items, options.max_workers ?? 4, async item => {
     const key = options.prefix ? `${options.prefix.replace(/\/+$/, '')}/${item.key}` : item.key;
@@ -228,7 +232,11 @@ async function transfer(items: AsyncIterable<TransferItem> | Iterable<TransferIt
       } catch (error) {
         if (body && !body.locked) await body.cancel().catch(() => {});
         options.signal?.throwIfAborted();
-        if (attempt >= retries) return { key, error: error instanceof Error ? error.message : String(error) };
+        if (attempt >= retries) {
+          console.info(`[datamulehub] Transfer failed: key=${key} attempts=${attempt + 1}`);
+          return { key, error: error instanceof Error ? error.message : String(error) };
+        }
+        console.info(`[datamulehub] Transfer retry: key=${key} retry=${attempt + 1}/${retries} delay=${2 ** attempt}s`);
         await sleep(2 ** attempt, options.signal);
       }
     }
@@ -236,10 +244,19 @@ async function transfer(items: AsyncIterable<TransferItem> | Iterable<TransferIt
     result.total++;
     if ('error' in item) result.failed.push({ key: item.key, error: item.error! });
     else { result.successful++; result.size_bytes += item.size; }
+    const now = Date.now();
+    if (now - last_progress >= 1000) {
+      console.info(`[datamulehub] ${label} progress: completed=${result.total} successful=${result.successful} failed=${result.failed.length} size_bytes=${result.size_bytes}`);
+      last_progress = now;
+    }
     options.on_progress?.({ completed: result.total, failed: result.failed.length, size_bytes: result.size_bytes });
   }
   const error_file = options.errors_json_filename === undefined ? dataset ? 'errors_datasets_transfer.json' : 'errors_archive_transfer.json' : options.errors_json_filename;
-  if (result.failed.length && error_file && (is_node() || options.write_file)) await save(error_file, bytes(new TextEncoder().encode(JSON.stringify(result.failed, null, 2))), options);
+  if (result.failed.length && error_file && (is_node() || options.write_file)) {
+    await save(error_file, bytes(new TextEncoder().encode(JSON.stringify(result.failed, null, 2))), options);
+    console.info(`[datamulehub] Transfer errors saved: count=${result.failed.length} filename=${error_file}`);
+  }
+  console.info(`[datamulehub] ${label} complete: ${result.successful}/${result.total} successful, ${result.failed.length} failed, size_bytes=${result.size_bytes} elapsed=${((Date.now() - started) / 1000).toFixed(1)}s`);
   return result;
 }
 

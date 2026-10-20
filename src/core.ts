@@ -3,6 +3,16 @@ import type { Billing, ByteStream, OutputOptions, RequestOptions, FileResult } f
 
 export const API_URL = 'https://api.datamule.xyz';
 
+/** Log only billing fields, never request headers, credentials, or signed URLs. */
+export function log_billing(message: string, billing: Billing): void {
+  const parts = [`[datamulehub] ${message}`];
+  if (typeof billing.total_charge === 'number') parts.push(`Cost: $${billing.total_charge.toFixed(4)}`);
+  if (typeof billing.remaining_balance === 'number') parts.push(`Remaining balance: $${billing.remaining_balance.toFixed(2)}`);
+  if (billing.remaining_api_key_credits === null) parts.push('API key credits left: Unlimited');
+  else if (typeof billing.remaining_api_key_credits === 'number') parts.push(`API key credits left: $${billing.remaining_api_key_credits.toFixed(4)}`);
+  console.info(parts.join(' | '));
+}
+
 export class ApiError extends Error {
   constructor(public readonly status: number, message: string) {
     super(`API request failed (${status}): ${message}`);

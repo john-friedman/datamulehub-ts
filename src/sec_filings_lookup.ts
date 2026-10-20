@@ -1,6 +1,6 @@
-import { api_json, get_api_key, object, positive } from './core.js';
+import { api_json, get_api_key, log_billing, object, positive } from './core.js';
 import { format_accession, normalize_accessions, resolve_cik_filter } from './utils.js';
-import type { Columns, FilingFilters } from './types.js';
+import type { Billing, Columns, FilingFilters } from './types.js';
 
 const names: Record<string, string> = {
   accession: 'accessionNumber', submission_type: 'submissionType', filing_date: 'filingDate',
@@ -34,6 +34,10 @@ async function* stream(endpoint: string, options: FilingFilters): AsyncGenerator
   const cik = await resolve_cik_filter(options.cik, options.ticker, options);
   const params = build_params({ ...options, cik });
   params.set('pageSize', String(page_size));
+  const started = Date.now();
+  let pages = 0, rows = 0, total_charge = 0;
+  let summary: Billing = {};
+  console.info(`[datamulehub] SEC filings lookup started: endpoint=${endpoint} page=${page} page_size=${page_size}`);
   while (true) {
     options.signal?.throwIfAborted();
     params.set('page', String(page));
@@ -45,9 +49,18 @@ async function* stream(endpoint: string, options: FilingFilters): AsyncGenerator
       if (length !== undefined && values.length !== length) throw new Error('Lookup returned mismatched column lengths.');
       length = values.length;
     }
+    const metadata = object(payload.metadata ?? {});
+    const pagination = object(metadata.pagination ?? {});
+    const billing = object(metadata.billing ?? {}) as Billing;
+    pages++; rows += length ?? 0;
+    if (typeof billing.total_charge === 'number') total_charge += billing.total_charge;
+    summary = { ...summary, ...billing, total_charge };
+    log_billing(`SEC filings lookup page fetched: endpoint=${endpoint} page=${page} rows=${length ?? 0} has_more=${Boolean(pagination.hasMore)} elapsed=${((Date.now() - started) / 1000).toFixed(1)}s`, billing);
     yield data as Columns;
-    const pagination = object(object(payload.metadata ?? {}).pagination ?? {});
-    if (options.page !== undefined || !pagination.hasMore) return;
+    if (options.page !== undefined || !pagination.hasMore) {
+      log_billing(`SEC filings lookup complete: endpoint=${endpoint} pages=${pages} rows=${rows} elapsed=${((Date.now() - started) / 1000).toFixed(1)}s`, summary);
+      return;
+    }
     if (!length) throw new Error('Lookup returned an empty page with hasMore=true.');
     page++;
   }

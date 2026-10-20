@@ -71,7 +71,13 @@ async function* items(mode: string, job: Job, options: ArchiveOptions): AsyncGen
     const suffix = mode === 'sgml' ? 'sgml' : 'json';
     let url: string;
     try { url = mode === 'xbrl' ? await xbrl_url(job, options) : `${options.sgml_base_url ?? SGML_BASE_URL}/${job.filingDate}/${job.accession}.sgml.zst`; }
-    catch (error) { if (mode === 'xbrl' && error instanceof ApiError && error.status === 404) return; throw error; }
+    catch (error) {
+      if (mode === 'xbrl' && error instanceof ApiError && error.status === 404) {
+        console.info(`[datamulehub] XBRL object unavailable; skipping: filing_date=${job.filingDate} accession=${job.accession}`);
+        return;
+      }
+      throw error;
+    }
     const body = await fetch_body(url, options);
     yield { name: `${job.filingDate}/${job.accession}.${suffix}${decompress ? '' : '.zst'}`, body: decompress ? decompress_zstd(body, mode === 'sgml') : body };
     return;
@@ -109,6 +115,22 @@ async function download(mode: string, options: ArchiveOptions): Promise<string[]
   const max_size = options.tar_max_size_mb === undefined ? 512 : options.tar_max_size_mb;
   if (max_size !== null && (!Number.isFinite(max_size) || max_size <= 0)) throw new RangeError('tar_max_size_mb must be positive or null.');
   await prepare_dir(directory, options.overwrite ?? false, options);
+  const started = Date.now();
+  let processed = 0, last_progress = started;
+  const label = mode.toUpperCase();
+  console.info(`[datamulehub] ${label} archive download started: output_dir=${directory}`);
+  const progress = () => {
+    processed++;
+    const now = Date.now();
+    if (now - last_progress >= 1000) {
+      console.info(`[datamulehub] ${label} archive download progress: processed=${processed} elapsed=${((now - started) / 1000).toFixed(1)}s`);
+      last_progress = now;
+    }
+  };
+  const complete = (paths: string[]): string[] => {
+    console.info(`[datamulehub] ${label} archive download complete: processed=${processed} files=${paths.length} output_dir=${directory} elapsed=${((Date.now() - started) / 1000).toFixed(1)}s`);
+    return paths;
+  };
   if (max_size === null) {
     const paths: string[] = [];
     for await (const completed of parallel(jobs(mode, options), count, async job => {
@@ -118,8 +140,11 @@ async function download(mode: string, options: ArchiveOptions): Promise<string[]
         await save(path, item.body, options); result.push(path);
       }
       return result;
-    })) for (const path of completed) paths.push(path);
-    return paths;
+    })) {
+      for (const path of completed) paths.push(path);
+      progress();
+    }
+    return complete(paths);
   }
   const batches = new TarBatches(directory, max_size * 1024 * 1024, options);
   try {
@@ -134,6 +159,7 @@ async function download(mode: string, options: ArchiveOptions): Promise<string[]
         } catch (error) { await dispose(result); throw error; }
       }, dispose)) {
         for (const item of prepared) await batches.append(item.name, item.temporary.size, item.temporary.open());
+        progress();
       }
     } else {
       // Without temporary disk, consume one entry at a time to bound memory.
@@ -146,11 +172,15 @@ async function download(mode: string, options: ArchiveOptions): Promise<string[]
             finally { await temporary.dispose(); }
           }
         }
+        progress();
       }
     }
     await batches.close();
-    return batches.paths;
-  } catch (error) { await batches.abort(error); throw error; }
+    return complete(batches.paths);
+  } catch (error) {
+    console.info(`[datamulehub] ${label} archive download failed: processed=${processed}`);
+    await batches.abort(error); throw error;
+  }
 }
 
 export function download_sgml(options: ArchiveOptions = {}): Promise<string[]> { return download('sgml', options); }

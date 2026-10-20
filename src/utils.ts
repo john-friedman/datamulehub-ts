@@ -50,6 +50,7 @@ function csv_rows(text: string): string[][] {
 }
 
 async function load_tickers(options: RequestOptions): Promise<Map<string, number[]>> {
+  console.info('[datamulehub] Loading ticker metadata');
   const response = await checked_fetch(METADATA_URL, {}, options);
   if (!response.body) throw new Error('Empty ticker metadata response.');
   const data = await collect(response.body.pipeThrough(new DecompressionStream('gzip')), 16 * 1024 * 1024);
@@ -75,6 +76,7 @@ async function load_tickers(options: RequestOptions): Promise<Map<string, number
   }
   if (!map.size) throw new Error('Ticker metadata is empty.');
   ticker_cache = { map, expires: Date.now() + 86400000 };
+  console.info(`[datamulehub] Ticker metadata loaded: symbols=${map.size}`);
   return map;
 }
 
@@ -90,7 +92,11 @@ export async function resolve_cik_filter(cik: Many<string | number> | undefined,
     else {
       loading ??= load_tickers(options).finally(() => { loading = undefined; });
       try { map = await loading; }
-      catch (error) { if (!ticker_cache) throw error; map = ticker_cache.map; }
+      catch (error) {
+        if (!ticker_cache) throw error;
+        console.info('[datamulehub] Unable to refresh ticker metadata; using cached copy');
+        map = ticker_cache.map;
+      }
     }
   }
   const ciks = new Set<number>();

@@ -1,4 +1,4 @@
-import { api_json, ApiError, get_api_key, is_node, node_module, object, parse_json, sleep } from './core.js';
+import { api_json, ApiError, get_api_key, is_node, log_billing, node_module, object, parse_json, sleep } from './core.js';
 import type { RequestOptions, Row } from './types.js';
 
 export type Source = 'Rss' | 'Efts' | 'anticipate';
@@ -12,28 +12,34 @@ export interface RemoveEndpointOptions extends RequestOptions { id?: string; end
 
 export function add_endpoint(options: AddEndpointOptions): Promise<Record<string, unknown>>;
 export function add_endpoint(endpoint: string, options?: EndpointOptions): Promise<Record<string, unknown>>;
-export function add_endpoint(endpoint: string | AddEndpointOptions, options: EndpointOptions = {}): Promise<Record<string, unknown>> {
+export async function add_endpoint(endpoint: string | AddEndpointOptions, options: EndpointOptions = {}): Promise<Record<string, unknown>> {
   const config = typeof endpoint === 'string' ? { ...options, endpoint } : endpoint;
   const sources = config.sources ?? ['Rss', 'Efts', 'anticipate'];
   if (!sources.length || sources.some(s => !['Rss', 'Efts', 'anticipate'].includes(s))) throw new TypeError('sources must contain Rss, Efts, or anticipate.');
   const url = new URL(config.endpoint);
   if (url.protocol !== 'https:') throw new TypeError('Webhook endpoint must use HTTPS.');
-  return api_json('/v3/sec-filings-webhooks', config, {
+  const result = await api_json('/v3/sec-filings-webhooks', config, {
     endpoint: config.endpoint,
     mode: config.submission_types?.length || config.ciks?.length ? 'filter' : 'all', sources,
     ...(config.submission_types?.length ? { submission_types: config.submission_types } : {}),
     ...(config.ciks?.length ? { ciks: config.ciks } : {}),
   });
+  console.info('[datamulehub] Webhook endpoint added');
+  return result;
 }
 
-export function list_endpoints(options: RequestOptions = {}): Promise<Record<string, unknown>> {
-  return api_json('/v3/sec-filings-webhooks', options);
+export async function list_endpoints(options: RequestOptions = {}): Promise<Record<string, unknown>> {
+  const result = await api_json('/v3/sec-filings-webhooks', options);
+  console.info(`[datamulehub] Webhook endpoints listed${Array.isArray(result.data) ? `: count=${result.data.length}` : ''}`);
+  return result;
 }
 
-export function remove_endpoint(options: RemoveEndpointOptions): Promise<Record<string, unknown>> {
+export async function remove_endpoint(options: RemoveEndpointOptions): Promise<Record<string, unknown>> {
   if ((options.id === undefined) === (options.endpoint === undefined)) throw new TypeError('Provide exactly one of id or endpoint.');
-  return api_json(`/v3/sec-filings-webhooks${options.id === undefined ? '' : `/${encodeURIComponent(options.id)}`}`, options,
+  const result = await api_json(`/v3/sec-filings-webhooks${options.id === undefined ? '' : `/${encodeURIComponent(options.id)}`}`, options,
     options.id === undefined ? { endpoint: options.endpoint } : undefined, 'DELETE');
+  console.info('[datamulehub] Webhook endpoint removed');
+  return result;
 }
 
 /** Minimal socket interface for notification streams. */
@@ -124,7 +130,10 @@ async function* events(socket: FilingSocket, options: StreamOptions, fastest: bo
         socket.ping(); pong_deadline = Date.now() + (options.ping_timeout ?? 10) * 1000;
         next_ping = Date.now() + (options.ping_interval ?? 60) * 1000;
       }
-      if (queue.length) { yield queue.shift()!; continue; }
+      if (queue.length) {
+        console.info(`[datamulehub] ${fastest ? 'Fastest filings ' : ''}WebSocket emitted filing`);
+        yield queue.shift()!; continue;
+      }
       if (closed || socket.readyState >= 2 || expires !== undefined && Date.now() >= expires) return;
       const idle = options.idle_timeout === undefined ? fastest ? null : 300 : options.idle_timeout;
       if (idle && Date.now() - last_activity >= idle * 1000) throw new WebSocketIdleTimeout('WebSocket idle timeout.');
@@ -138,6 +147,7 @@ async function* events(socket: FilingSocket, options: StreamOptions, fastest: bo
     remove_pong?.();
     socket.removeEventListener('message', onmessage); socket.removeEventListener('close', onclose); socket.removeEventListener('error', onerror);
     socket.close(1000, 'Consumer closed');
+    console.info(`[datamulehub] ${fastest ? 'Fastest filings ' : ''}WebSocket disconnected`);
   }
 }
 
@@ -158,26 +168,32 @@ async function* stream(options: StreamOptions, fastest: boolean): AsyncGenerator
     // Token purchases are outside the reconnect catch, so a failed purchase is
     // surfaced rather than automatically making repeated chargeable requests.
     if (fastest && (!access || Date.now() >= access.expires)) {
+      console.info('[datamulehub] Requesting fastest filings access');
       const payload = await api_json('/v3/auth/service-token?service=fastest-sec-filings-websocket', options, undefined, 'POST');
       const data = object(payload.data);
       const expires = Date.parse(String(data.expires_at));
       if (typeof data.token !== 'string' || typeof data.websocket_url !== 'string' || !Number.isFinite(expires) || expires <= Date.now()) throw new Error('Invalid fastest-filings token response.');
       access = { url: data.websocket_url, token: data.token, expires };
+      log_billing(`Fastest filings access issued: expires_at=${new Date(expires).toISOString()}`, object(object(payload.metadata ?? {}).billing ?? {}));
     }
     try {
       const url = access?.url ?? `${options.base_url ?? 'https://api.datamule.xyz'}/v3/websocket`.replace(/^http/, 'ws');
       const socket = await connect_socket(url, access?.token ?? key, options);
+      console.info(`[datamulehub] ${fastest ? 'Fastest filings ' : ''}WebSocket connected`);
       yield* events(socket, options, fastest, access?.expires);
+      console.info(`[datamulehub] WebSocket closed; reconnecting in ${options.reconnect_delay ?? 1}s`);
     } catch (error) {
       options.signal?.throwIfAborted();
       if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
         if (access && Date.now() >= access.expires) continue;
+        console.info(`[datamulehub] WebSocket authentication failed: status=${error.status}`);
         throw error;
       }
       const retry = error instanceof WebSocketIdleTimeout || error instanceof WebSocketPingTimeout || error instanceof TypeError ||
         error instanceof ApiError && (error.status >= 500 || error.status === 429) ||
         error instanceof Error && error.message === 'WebSocket transport error.';
       if (!retry) throw error;
+      console.info(`[datamulehub] WebSocket stream interrupted; reconnecting in ${options.reconnect_delay ?? 1}s (${error instanceof Error ? error.name : 'transport error'})`);
     }
     await sleep(options.reconnect_delay ?? 1, options.signal);
   }
