@@ -1,0 +1,38 @@
+# Dependencies and generated output
+node_modules/
+.npm-cache/
+dist/
+*.tsbuildinfo
+*.tgz
+
+# Local secrets (templates remain tracked)
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.npmrc
+credentials*.json
+service_account*.json
+*.pem
+*.key
+
+# Wrangler and local data
+.wrangler/
+downloads/
+datamule-query-result/
+*.parquet
+*.tar
+*.tar.gz
+*.sgml
+*.zst
+errors_*transfer.json
+*.partial-*
+
+# Logs and editor/OS state
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

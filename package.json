@@ -1,0 +1,45 @@
+{
+  "name": "datamulehub-ts",
+  "version": "0.1.0",
+  "description": "TypeScript client for Datamule cloud APIs",
+  "type": "module",
+  "sideEffects": false,
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "import": "./dist/*.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "check:worker": "node scripts/check-worker.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "aws4fetch": "^1.0.20",
+    "fzstd": "^0.1.1",
+    "hyparquet": "^1.31.5",
+    "hyparquet-writer": "^0.16.13",
+    "lossless-json": "^4.3.2",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}
