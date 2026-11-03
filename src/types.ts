@@ -53,7 +53,8 @@ export interface DownloadLink {
   size_bytes?: number;
   size_gb?: number;
   expires_at?: string;
-  last_modified?: string;
+  /** S3 last-modified timestamp in Unix seconds. */
+  last_modified?: number;
   billing: Billing;
 }
 

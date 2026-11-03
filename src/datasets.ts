@@ -3,7 +3,7 @@ import { DOCUMENT_TYPES_BY_TABLE } from './document_types.js';
 import { fetch_body } from './sec_filings_archive.js';
 import { filings } from './sec_filings_lookup.js';
 import { format_accession, normalize_accessions } from './utils.js';
-import { column_names, merge_schema, parquet_rows, parquet_source, parquet_stream, remote_file } from './parquet.js';
+import { merge_schema, parquet_rows, parquet_source, parquet_stream, remote_file } from './parquet.js';
 import type { ParquetOptions, ParquetSource } from './parquet.js';
 import type { Billing, DownloadLink, FileResult, OutputOptions, RequestOptions, Row, Accession } from './types.js';
 
@@ -62,22 +62,38 @@ function source_key(table: string | undefined, date: string, accession: Accessio
   return table ? `sec-filings/${METADATA_TABLES.includes(table) ? 'metadata' : 'xml2tables'}/${date}/${table}/${number}.parquet` : `sec-filings/simple_xbrl/${date}/${number}.parquet`;
 }
 
-function delta_date(): string | undefined {
-  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
+function eastern_parts(value: Date): { date: string; hour: number } {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' }).formatToParts(value);
   const get = (type: string) => parts.find(p => p.type === type)!.value;
-  const minutes = Number(get('hour')) * 60 + Number(get('minute'));
-  const date = `${get('year')}-${get('month')}-${get('day')}`;
-  if (minutes < 150) return new Date(Date.parse(`${date}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
-  return minutes < 390 ? undefined : date;
+  return { date: `${get('year')}-${get('month')}-${get('day')}`, hour: Number(get('hour')) };
 }
 
-async function candidates(table: string | undefined, date: string | undefined, accessions: string[] | undefined, options: DownloadOptions): Promise<Set<string>> {
+function last_delta_date(now: Date): Date {
+  const current = eastern_parts(now);
+  const last = new Date(`${current.date}T00:00:00Z`);
+  if (current.hour < 6) last.setUTCDate(last.getUTCDate() - 1);
+  return last;
+}
+
+function delta_dates(last_modified: number, now: Date): string[] {
+  // Each overnight snapshot contains all filing days before its Eastern publication date.
+  const first = eastern_parts(new Date(last_modified * 1000)).date;
+  const last = last_delta_date(now);
+  const dates: string[] = [];
+  for (const date = new Date(`${first}T00:00:00Z`); date <= last; date.setUTCDate(date.getUTCDate() + 1)) {
+    dates.push(date.toISOString().slice(0, 10));
+  }
+  return dates;
+}
+
+async function candidates(table: string | undefined, dates: string[], accessions: string[] | undefined, options: DownloadOptions): Promise<Set<string>> {
   const filters = table ? METADATA_TABLES.includes(table) ? {} : { document_type: DOCUMENT_TYPES_BY_TABLE[table] } : { contains_xbrl: true };
   if (table && !METADATA_TABLES.includes(table) && !DOCUMENT_TYPES_BY_TABLE[table]) throw new Error(`Unknown XML table: ${table}`);
   const result = new Set<string>();
-  if (!date && !accessions) return result;
-  for await (const filing of filings({ ...options, ...filters, accession: accessions, filing_date: accessions ? undefined : date }, !table)) {
-    result.add(source_key(table, filing.filingDate, filing.accession));
+  for (const date of accessions ? [undefined] : dates) {
+    for await (const filing of filings({ ...options, ...filters, accession: accessions, filing_date: date }, !table)) {
+      result.add(source_key(table, filing.filingDate, filing.accession));
+    }
   }
   return result;
 }
@@ -100,21 +116,6 @@ async function as_source(link: DownloadLink, options: DownloadOptions, key?: str
   return parquet_source(await remote_file(link.download_url, link.size_bytes, options), key);
 }
 
-async function remove_snapshot_keys(source: ParquetSource, keys: Set<string>, table: string | undefined, options: DownloadOptions): Promise<void> {
-  const names = column_names(source);
-  if (names.includes('_sourceKey')) {
-    for await (const row of parquet_rows(source, options, ['_sourceKey'])) if (row._sourceKey) keys.delete(String(row._sourceKey));
-  }
-  if (keys.size && names.includes('filingDate') && names.includes('accessionNumber')) {
-    for await (const row of parquet_rows(source, options, ['filingDate', 'accessionNumber'])) {
-      if (row.filingDate != null && row.accessionNumber != null) {
-        const date = row.filingDate instanceof Date ? row.filingDate.toISOString().slice(0, 10) : String(row.filingDate);
-        keys.delete(source_key(table, date, row.accessionNumber as Accession));
-      }
-    }
-  }
-}
-
 export async function download(dataset: string, options: DownloadOptions = {}): Promise<DatasetResult> {
   require_output(options);
   const mode = options.from_storage ?? 'both';
@@ -124,7 +125,6 @@ export async function download(dataset: string, options: DownloadOptions = {}): 
   const accessions = normalize_accessions(options.accession);
   if (accessions && (!has_delta || mode === 'daily')) throw new TypeError('accession requires an XML, metadata, or simple_xbrl dataset and from_storage=both or delta.');
   if (mode === 'delta' && !has_delta) throw new TypeError('This dataset does not support delta storage.');
-  const date = has_delta && mode !== 'daily' ? delta_date() : undefined;
   const started = Date.now();
   console.info(`[datamulehub] Dataset download started: dataset=${dataset} from_storage=${mode}`);
   const complete = (result: DatasetResult): DatasetResult => {
@@ -137,7 +137,15 @@ export async function download(dataset: string, options: DownloadOptions = {}): 
   let snapshot: ParquetSource | undefined;
   const daily = mode !== 'delta' && !accessions ? await get_link(path, options) : undefined;
   if (daily) bills.push(daily.billing);
-  if (daily && !date) {
+  let dates: string[] = [];
+  if (has_delta && mode !== 'daily' && !accessions) {
+    const now = new Date();
+    if (daily) {
+      if (typeof daily.last_modified !== 'number' || !Number.isFinite(daily.last_modified)) throw new Error('Daily download link is missing a valid last_modified timestamp.');
+      dates = delta_dates(daily.last_modified, now);
+    } else dates = [last_delta_date(now).toISOString().slice(0, 10)];
+  }
+  if (daily && !dates.length) {
     const body = await fetch_body(daily.download_url, options, response => {
       if (options.filename !== undefined) return;
       const value = response.headers.get('content-disposition') ?? '';
@@ -149,11 +157,8 @@ export async function download(dataset: string, options: DownloadOptions = {}): 
     const size = await save(filename, body, options);
     return complete({ ...billing_result(filename, size, bills), object_key: daily.object_key });
   }
-  const keys = await candidates(table, date, accessions, options);
-  if (daily) {
-    snapshot = await as_source(daily, options);
-    if (keys.size) await remove_snapshot_keys(snapshot, keys, table, options);
-  }
+  const keys = await candidates(table, dates, accessions, options);
+  if (daily) snapshot = await as_source(daily, options);
   console.info(`[datamulehub] Dataset delta lookup complete: candidates=${keys.size}`);
   const sources: ParquetSource[] = snapshot ? [snapshot] : [];
   const object_keys: string[] = [];

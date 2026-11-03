@@ -8,6 +8,7 @@ import type { Billing, ByteStream, OutputOptions, RequestOptions, Row } from './
 import type { SchemaElement } from 'hyparquet';
 
 export interface QueryOptions extends RequestOptions, OutputOptions, ParquetOptions {
+  from_storage?: 'both' | 'daily' | 'delta';
   output_dir?: string;
   wait_seconds?: number | null;
   chunk_size?: number;
@@ -111,6 +112,8 @@ async function sniff(body: ByteStream): Promise<{ parquet: boolean; body: ByteSt
 export async function query(sql: string, options: QueryOptions = {}): Promise<QueryResult> {
   require_output(options);
   if (typeof sql !== 'string' || !sql.trim()) throw new TypeError('sql is required.');
+  const from_storage = options.from_storage ?? 'both';
+  if (!['both', 'daily', 'delta'].includes(from_storage)) throw new TypeError('from_storage must be both, daily, or delta.');
   const directory = options.output_dir ?? 'datamule-query-result';
   const started = Date.now();
   console.info(`[datamulehub] Query started: engine=${is_fastest(sql) ? 'fastest metadata' : 'athena'}`);
@@ -143,7 +146,7 @@ export async function query(sql: string, options: QueryOptions = {}): Promise<Qu
     await write(parquet_stream(rows, fastest_schema(result.columns), options));
   } else {
     if (options.wait_seconds != null && (!Number.isFinite(options.wait_seconds) || options.wait_seconds < 0)) throw new RangeError('wait_seconds must be nonnegative or null.');
-    const body: Record<string, unknown> = { query: sql };
+    const body: Record<string, unknown> = { query: sql, from_storage };
     if (options.wait_seconds !== null) body.wait_seconds = options.wait_seconds ?? 600;
     const response = await api_response('/v3/athena/download', options, body, 'POST', 'application/octet-stream');
     if (!response.body) throw new Error('Empty Athena query result.');
@@ -168,6 +171,7 @@ export async function query(sql: string, options: QueryOptions = {}): Promise<Qu
 
 export interface ReadQueryOptions extends Omit<QueryOptions, 'output_dir' | 'write_file'> { max_rows?: number }
 export async function read_query(sql: string, options: ReadQueryOptions = {}): Promise<Row[]> {
+  if (!['both', 'daily', 'delta'].includes(options.from_storage ?? 'both')) throw new TypeError('from_storage must be both, daily, or delta.');
   if (options.max_rows !== undefined) positive(options.max_rows, 'max_rows');
   if (is_fastest(sql)) {
     console.info('[datamulehub] Fastest filings metadata query started');
